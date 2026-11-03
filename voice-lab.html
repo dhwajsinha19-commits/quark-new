@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#05070c">
+<title>Quark voice lab</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #05070c; --card: #0d121b; --line: #1c2535; --text: #dbe6f5; --dim: #7d8aa0;
+    --eye: #7fe9ff; --eye-glow: rgba(127, 233, 255, .55);
+    --accent: #7fe9ff;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+  body { padding: 0 16px calc(40px + env(safe-area-inset-bottom)); max-width: 600px; margin: 0 auto; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin: 18px 0 0; }
+  h2 { font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin: 0 0 10px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px; margin-top: 14px; }
+
+  /* ---- the face ---- */
+  .stage { position: relative; height: 210px; margin-top: 12px; border-radius: 20px; background: radial-gradient(120% 120% at 50% 40%, #0b111b, #05070c 70%); border: 1px solid var(--line); overflow: hidden; }
+  .eyes { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 44px; transition: filter .2s; }
+  .eye {
+    width: var(--w, 58px); height: var(--h, 78px); border-radius: var(--r, 42%);
+    background: var(--eye); box-shadow: 0 0 22px var(--eye-glow), 0 0 60px var(--eye-glow);
+    transform: translateY(var(--dy, 0)) rotate(var(--rot, 0deg)) scaleY(var(--sy, 1)) scaleX(var(--sx, 1));
+    transition: width .25s, height .25s, border-radius .25s, background .25s, box-shadow .25s;
+  }
+  .eye.r { --rot: var(--rotr, 0deg); }
+  .eye.l { --rot: var(--rotl, 0deg); }
+  .eyes.glitch { animation: glitch .12s steps(2) infinite; }
+  @keyframes glitch { 0% { transform: translate(3px, -2px); filter: hue-rotate(40deg); } 100% { transform: translate(-4px, 2px); filter: hue-rotate(-60deg) contrast(1.4); } }
+  .stage .tag { position: absolute; left: 12px; bottom: 10px; font-size: 12px; color: var(--dim); letter-spacing: .06em; }
+  .stage.asleep .eye { --h: 5px !important; --w: 64px !important; --r: 6px !important; opacity: .55; }
+
+  /* mood looks: size, shape, tilt and colour, so each mood is readable even with the sound off */
+  .m-neutral  { }
+  .m-happy    { --h: 52px; --r: 50% 50% 18% 18%; --eye: #8cf6e0; --eye-glow: rgba(140,246,224,.55); }
+  .m-excited  { --h: 92px; --w: 62px; --eye: #ffe36b; --eye-glow: rgba(255,227,107,.6); }
+  .m-sad      { --h: 56px; --r: 18% 18% 50% 50%; --rotl: -12deg; --rotr: 12deg; --dy: 8px; --eye: #7aa7ff; --eye-glow: rgba(122,167,255,.5); }
+  .m-sulky    { --h: 30px; --r: 16%; --dy: 8px; --eye: #a799d6; --eye-glow: rgba(167,153,214,.4); }
+  .m-angry    { --h: 62px; --r: 14%; --rotl: 14deg; --rotr: -14deg; --eye: #ff5a4d; --eye-glow: rgba(255,90,77,.6); }
+  .m-sleepy   { --h: 18px; --r: 50%; --dy: 10px; --eye: #6f86a8; --eye-glow: rgba(111,134,168,.35); }
+  .m-scared   { --h: 90px; --w: 46px; --eye: #d6ff86; --eye-glow: rgba(214,255,134,.55); }
+  .m-shy      { --h: 46px; --w: 46px; --r: 50%; --dy: 10px; --eye: #ff9fd0; --eye-glow: rgba(255,159,208,.5); }
+  .m-smug     { --h: 34px; --r: 12% 12% 50% 50%; --rotl: 4deg; --rotr: 4deg; --eye: #8cffb2; --eye-glow: rgba(140,255,178,.45); }
+  .m-curious  { --h: 84px; --w: 56px; --rotr: -8deg; --eye: #8ae8ff; --eye-glow: rgba(138,232,255,.55); }
+  .m-curious .eye.r { --sy: 1.12; --sx: 1.12; }
+
+  /* ---- output meter: proves sound is leaving the page, even if you cannot hear it ---- */
+  .meter { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 12px; color: var(--dim); }
+  .meter .bar { flex: 0 0 38%; height: 8px; border-radius: 6px; background: #0b111b; border: 1px solid var(--line); overflow: hidden; }
+  .meter .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .06s linear; }
+
+  /* ---- subtitles ---- */
+  .subs { min-height: 64px; margin-top: 12px; padding: 12px 14px; border-radius: 14px; background: #080c13; border: 1px solid var(--line); font-size: 20px; line-height: 1.35; display: flex; flex-wrap: wrap; gap: 0 .35em; align-content: flex-start; }
+  .subs .w { color: var(--dim); animation: pop .18s ease-out; }
+  .subs .w.now { color: #fff; text-shadow: 0 0 12px var(--eye-glow); }
+  .subs .ghost { color: #3c475b; font-size: 14px; }
+  @keyframes pop { from { transform: translateY(5px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+  /* ---- controls ---- */
+  .row { display: flex; gap: 8px; align-items: center; }
+  input[type=text], select { width: 100%; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: #080c13; color: var(--text); font: inherit; min-width: 0; }
+  button { font: inherit; color: var(--text); background: #131b29; border: 1px solid var(--line); border-radius: 12px; padding: 11px 13px; cursor: pointer; touch-action: manipulation; }
+  button:active { background: #1b2740; }
+  button.primary { background: var(--accent); color: #04121a; border-color: transparent; font-weight: 600; white-space: nowrap; }
+  button.primary:active { filter: brightness(.9); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .chips button { padding: 8px 11px; border-radius: 999px; font-size: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 8px; }
+  .sl { display: grid; grid-template-columns: 92px 1fr 54px; gap: 10px; align-items: center; margin-top: 8px; font-size: 14px; }
+  .sl output { text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  label.l { display: block; font-size: 12px; color: var(--dim); margin: 12px 0 6px; }
+  .now-playing { font-size: 14px; color: var(--accent); min-height: 20px; margin-top: 10px; }
+  .hint { color: var(--dim); font-size: 13px; margin: 8px 0 0; }
+  pre { margin: 10px 0 0; padding: 10px; background: #080c13; border: 1px solid var(--line); border-radius: 10px; color: var(--dim); font-size: 12px; overflow: auto; white-space: pre-wrap; }
+
+  /* ---- wake screen ---- */
+  .wake { position: fixed; inset: 0; z-index: 10; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 28px; transition: opacity .5s, visibility .5s; }
+  .wake.gone { opacity: 0; visibility: hidden; pointer-events: none; }
+  .wake .sleepeyes { display: flex; gap: 40px; }
+  .wake .sleepeyes i { display: block; width: 62px; height: 6px; border-radius: 6px; background: #3a4a63; }
+  .wake button { font-size: 18px; padding: 16px 28px; border-radius: 16px; }
+  .wake p { margin: 0; color: var(--dim); font-size: 13px; max-width: 260px; text-align: center; }
+</style>
+</head>
+<body>
+
+<div class="wake" id="wake">
+  <div class="sleepeyes"><i></i><i></i></div>
+  <button class="primary" id="wakeBtn">Tap to wake Quark</button>
+  <p>Sound needs one tap first (iPhone and Safari insist). Turn the volume up a little.</p>
+</div>
+
+<h1>Quark voice lab</h1>
+
+<div class="stage asleep" id="stage">
+  <div class="eyes m-neutral" id="eyes"><div class="eye l"></div><div class="eye r"></div></div>
+  <div class="tag" id="faceTag">asleep</div>
+</div>
+<div class="meter" id="meterBox"><div class="bar"><i id="meterBar"></i></div><span id="audioStatus">audio: asleep</span></div>
+<div class="subs" id="subs"><span class="ghost">Words show up here as they are said.</span></div>
+
+<div class="card">
+  <h2>Say something</h2>
+  <div class="row">
+    <input type="text" id="text" value="Hi! I missed you!" autocomplete="off" enterkeyhint="go" aria-label="Text to speak">
+    <button class="primary" id="speak">Speak</button>
+    <button id="stopBtn" aria-label="Stop">Stop</button>
+  </div>
+  <div class="chips" id="presets"></div>
+
+  <label class="l" for="style">Voice style</label>
+  <select id="style">
+    <option value="voice">Pet voice (light, soft, talks like a little creature)</option>
+    <option value="chirp">Chirps (one beep per letter, the first version)</option>
+  </select>
+
+  <label class="l" for="mood">Mood</label>
+  <select id="mood"></select>
+  <div class="sl"><span>Intensity</span><input type="range" id="intensity" min="0" max="100" step="1" value="70"><output id="o-intensity">70</output></div>
+</div>
+
+<div class="card">
+  <h2>Tune the voice</h2>
+  <div class="sl"><span>Pitch (Hz)</span><input type="range" id="pitch" min="200" max="1200" step="5" value="520"><output></output></div>
+  <div class="sl"><span>Speed</span><input type="range" id="speed" min="0.5" max="2" step="0.05" value="1"><output></output></div>
+  <div class="sl"><span>Volume</span><input type="range" id="volume" min="0" max="0.5" step="0.01" value="0.18"><output></output></div>
+  <div class="sl"><span>Vowel colour</span><input type="range" id="formant" min="0" max="1" step="0.01" value="0.6"><output></output></div>
+  <div class="sl"><span>Softness</span><input type="range" id="softness" min="0.8" max="2.8" step="0.05" value="2"><output></output></div>
+  <div class="sl"><span>Vibrato</span><input type="range" id="vibrato" min="0" max="40" step="1" value="14"><output></output></div>
+  <div class="sl"><span>Ring mod</span><input type="range" id="ring" min="0" max="1" step="0.01" value="0"><output></output></div>
+  <div class="sl"><span>Bitcrush</span><input type="range" id="crush" min="0" max="1" step="0.01" value="0"><output></output></div>
+  <p class="hint" id="styleHint">Softness: low = buzzier and brighter, high = softer and rounder. Vibrato is the little life in the voice. Ring mod and bitcrush make it more sci-fi robot: they start at zero for a cute pet. No sound? Watch the level bar at the top: if it moves, the voice is playing, so check your Mac volume, output device and that this tab is not muted.</p>
+  <div class="row" style="margin-top:12px">
+    <button id="testTone">Test tone (plain)</button>
+    <button id="reset">Reset</button>
+    <button id="copy">Copy my settings</button>
+  </div>
+  <pre id="dump" hidden></pre>
+</div>
+
+<div class="card">
+  <h2>Sound effects</h2>
+  <div class="grid" id="fx"></div>
+  <h2 style="margin-top:16px">Quiet reactions (usable while the user talks)</h2>
+  <div class="grid" id="bc"></div>
+</div>
+
+<div class="card">
+  <h2>Proof tour</h2>
+  <div class="grid">
+    <button id="tourMoods">1. Same line, all 11 moods</button>
+    <button id="tourFx">2. Every sound effect</button>
+    <button id="tourVowels">3. The five vowels</button>
+  </div>
+  <div class="now-playing" id="nowPlaying"></div>
+  <p class="hint">1 uses the sentence in the box above, at the intensity you set. 3 plays each vowel at the same steady pitch (so only the colour changes), then "a e i o u" as letters.</p>
+</div>
+
+<script type="module">
+import { createRobotVoice, MOOD_NAMES, splitSentences } from './js/robotvoice.js';
+
+const $ = (id) => document.getElementById(id);
+const voice = createRobotVoice();
+const D = JSON.parse(JSON.stringify(voice.config));                      // the defaults, for Reset
+
+// ---------------------------------------------------------------- the face
+const stage = $('stage'), eyes = $('eyes'), tag = $('faceTag');
+const eyeEls = [...eyes.querySelectorAll('.eye')];
+let talkUntil = 0, bump = 0, blinkAt = performance.now() + 2500, blinkEnd = 0;
+
+function setLook(mood) {
+  eyes.className = `eyes m-${mood}`;
+  tag.textContent = stage.classList.contains('asleep') ? 'asleep' : mood;
+}
+function faceTalk(ms, mood = null) {
+  if (mood) setLook(mood);
+  talkUntil = performance.now() + ms;
+}
+function frame(now) {
+  let sy = 1, dy = 0;
+  if (now < talkUntil) {                                                  // talking: the eyes pulse in time with the chirps
+    bump *= 0.9;
+    sy = 1 - 0.14 * Math.abs(Math.sin(now / 62)) - 0.1 * bump;
+    dy = -2 * Math.sin(now / 90);
+  } else bump = 0;
+  if (now > blinkAt) { blinkEnd = now + 110; blinkAt = now + 2200 + Math.random() * 3200; }
+  if (now < blinkEnd) sy *= 0.08;
+  for (const e of eyeEls) { e.style.setProperty('--sy', sy.toFixed(3)); e.style.setProperty('--dy', `${dy.toFixed(1)}px`); }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---------------------------------------------------------------- subtitles
+const subs = $('subs');
+function subsClear() { subs.innerHTML = ''; }
+function subsWord(word) {
+  subs.querySelectorAll('.now').forEach((n) => n.classList.remove('now'));
+  const s = document.createElement('span');
+  s.className = 'w now'; s.textContent = word;
+  subs.appendChild(s);
+}
+function subsDone() { subs.querySelectorAll('.now').forEach((n) => n.classList.remove('now')); }
+
+// ---------------------------------------------------------------- controls
+const moodSel = $('mood');
+MOOD_NAMES.forEach((m) => { const o = document.createElement('option'); o.value = m; o.textContent = m; moodSel.appendChild(o); });
+moodSel.value = 'neutral';
+
+const sliders = {
+  pitch:   { el: $('pitch'),   set: (v) => { voice.config.pitch = v; }, fmt: (v) => Math.round(v) },
+  speed:   { el: $('speed'),   set: (v) => { voice.config.speed = v; }, fmt: (v) => v.toFixed(2) },
+  volume:  { el: $('volume'),  set: (v) => { voice.config.volume = v; }, fmt: (v) => v.toFixed(2) },
+  formant: { el: $('formant'), set: (v) => { voice.config.formant.amount = v; }, fmt: (v) => v.toFixed(2) },
+  softness: { el: $('softness'), set: (v) => { voice.config.voice.softness = v; }, fmt: (v) => v.toFixed(2) },
+  vibrato: { el: $('vibrato'), set: (v) => { voice.config.voice.vibrato = v; }, fmt: (v) => Math.round(v) + 'c' },
+  ring:    { el: $('ring'),    set: (v) => { voice.config.ringMod.amount = v; }, fmt: (v) => v.toFixed(2) },
+  crush:   { el: $('crush'),   set: (v) => { voice.config.bitcrush.amount = v; }, fmt: (v) => v.toFixed(2) },
+};
+for (const s of Object.values(sliders)) {
+  const out = s.el.parentElement.querySelector('output');
+  const sync = () => { const v = parseFloat(s.el.value); s.set(v); out.textContent = s.fmt(v); };
+  s.el.addEventListener('input', sync); sync();
+}
+$('intensity').addEventListener('input', () => { $('o-intensity').textContent = $('intensity').value; });
+
+// the voice style: the shared effects (ring mod, crush) have different defaults for each, so the sliders follow the style
+const styleSel = $('style');
+function syncSlidersToConfig() {
+  const c = voice.config;
+  sliders.pitch.el.value = c.pitch; sliders.speed.el.value = c.speed; sliders.volume.el.value = c.volume; sliders.formant.el.value = c.formant.amount;
+  sliders.softness.el.value = c.voice.softness; sliders.vibrato.el.value = c.voice.vibrato; sliders.ring.el.value = c.ringMod.amount; sliders.crush.el.value = c.bitcrush.amount;
+  for (const s of Object.values(sliders)) s.el.dispatchEvent(new Event('input'));
+}
+styleSel.addEventListener('change', () => { voice.setStyle(styleSel.value); syncSlidersToConfig(); try { localStorage.setItem('quark-voice-style', styleSel.value); } catch { /* fine */ } });
+try { const saved = localStorage.getItem('quark-voice-style'); if (saved === 'chirp' || saved === 'voice') { styleSel.value = saved; voice.setStyle(saved); } } catch { /* fine */ }
+syncSlidersToConfig();
+
+const opts = () => ({
+  mood: moodSel.value, intensity: +$('intensity').value,
+  pitch: +$('pitch').value, speed: +$('speed').value, volume: +$('volume').value,
+});
+
+// ---------------------------------------------------------------- speaking
+let token = 0;                                                            // bumped to cancel a proof tour
+function ensure() { voice.unlock(); }
+
+/** Speak with subtitles and the face. Returns { ms, done } so the tours can wait for the end. */
+function say(text, o = opts()) {
+  ensure();
+  const sentences = splitSentences(text);
+  setLook(o.mood);
+  subsClear();
+  const handlers = {
+    onWord: (w) => { bump = 1; subsWord(w); },
+    onEnd: () => { subsDone(); },
+  };
+  if (sentences.length > 1) {
+    const q = voice.speakQueue(sentences, { ...o, ...handlers });
+    faceTalk(q.ms);
+    return { ms: q.ms, done: q.done };
+  }
+  const ms = voice.robotSpeak(text, { ...o, ...handlers, onStart: () => faceTalk(ms) });
+  faceTalk(ms);
+  return { ms, done: new Promise((r) => setTimeout(r, ms)) };
+}
+
+$('speak').addEventListener('click', () => { token++; say($('text').value || 'Hi!'); });
+$('text').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('speak').click(); });
+$('stopBtn').addEventListener('click', () => { token++; voice.stop(); talkUntil = 0; subsDone(); $('nowPlaying').textContent = ''; });
+
+const PRESETS = ['Hi! I missed you!', 'Ow! That hurt!', 'Want to play a game?', "Hmph. I'm not talking to you."];
+const PRESET_MOOD = { 'Hi! I missed you!': 'happy', 'Ow! That hurt!': 'angry', 'Want to play a game?': 'curious', "Hmph. I'm not talking to you.": 'sulky' };
+for (const p of PRESETS) {
+  const b = document.createElement('button');
+  b.textContent = p;
+  b.addEventListener('click', () => { token++; $('text').value = p; moodSel.value = PRESET_MOOD[p]; say(p); });
+  $('presets').appendChild(b);
+}
+
+// ---------------------------------------------------------------- sound effects
+const FX = [
+  ['happyChirp', 'Happy chirp', 'happy'], ['sadWhimper', 'Sad whimper', 'sad'], ['surprised', 'Surprised', 'excited'], ['giggle', 'Giggle', 'happy'],
+  ['gasp', 'Gasp', 'scared'], ['sigh', 'Sigh', 'sad'], ['yawn', 'Yawn', 'sleepy'], ['growlBuzz', 'Growl buzz', 'angry'],
+  ['squeak', 'Squeak', 'shy'], ['purr', 'Purr', 'happy'], ['glitchBuzz', 'Glitch buzz', 'scared'], ['powerUp', 'Power up', 'excited'],
+  ['whistle', 'Whistle', 'happy'], ['hum', 'Hum', 'smug'], ['hmm', 'Hmm?', 'curious'], ['ooh', 'Ooh!', 'curious'],
+];
+function playFx(name, mood) {
+  ensure();
+  subsClear();
+  const ms = voice.effects[name]();
+  setLook(mood); faceTalk(ms);
+  if (name === 'glitchBuzz') { eyes.classList.add('glitch'); setTimeout(() => eyes.classList.remove('glitch'), ms); }
+  return ms;
+}
+for (const [name, label, mood] of FX) {
+  const b = document.createElement('button');
+  b.textContent = label; b.dataset.fx = name;
+  b.addEventListener('click', () => { token++; playFx(name, mood); });
+  $('fx').appendChild(b);
+}
+for (const [type, label] of [['mm', 'mm'], ['ooh', 'ooh'], ['huh', 'huh?']]) {
+  const b = document.createElement('button');
+  b.textContent = label;
+  b.addEventListener('click', () => { ensure(); const ms = voice.backchannel(type); faceTalk(ms); });
+  $('bc').appendChild(b);
+}
+
+// ---------------------------------------------------------------- proof tours
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const np = $('nowPlaying');
+async function tour(items, gap = 650) {
+  const my = ++token;
+  for (let i = 0; i < items.length; i++) {
+    if (token !== my) return;
+    const it = items[i];
+    np.textContent = `${i + 1}/${items.length}: ${it.label}`;
+    const ms = await it.play();
+    await wait(ms + gap);
+  }
+  if (token === my) np.textContent = 'Done.';
+}
+
+$('tourMoods').addEventListener('click', () => {
+  ensure();
+  const line = $('text').value || 'Hi! I missed you!';
+  const o = opts();
+  tour(MOOD_NAMES.map((m) => ({ label: `"${line}" as ${m}`, play: () => say(line, { ...o, mood: m, intensity: m === 'neutral' ? o.intensity : Math.max(o.intensity, 80) }).ms })), 800);
+});
+$('tourFx').addEventListener('click', () => {
+  ensure();
+  tour(FX.map(([name, label, mood]) => ({ label: label, play: () => (name === 'purr' ? playFx(name, mood) : playFx(name, mood)) })), 500);
+});
+$('tourVowels').addEventListener('click', () => {
+  ensure();
+  const items = [...'aeiou'].map((v) => ({
+    label: `vowel "${v}", same pitch`,
+    play: () => { subsClear(); subsWord(v); const ms = voice.effects.vowel(v); faceTalk(ms); return ms; },
+  }));
+  items.push({ label: 'as letters: a e i o u', play: () => say('a e i o u', { ...opts(), mood: 'neutral' }).ms });
+  tour(items, 450);
+});
+
+// ---------------------------------------------------------------- misc
+$('reset').addEventListener('click', () => {
+  voice.setStyle(styleSel.value);                                         // back to that style's own defaults
+  voice.config.formant.amount = D.formant.amount; voice.config.voice.softness = D.voice.softness; voice.config.voice.vibrato = D.voice.vibrato;
+  voice.config.pitch = D.pitch; voice.config.speed = D.speed; voice.config.volume = D.volume;
+  syncSlidersToConfig();
+  $('intensity').value = 70; $('intensity').dispatchEvent(new Event('input')); moodSel.value = 'neutral';
+});
+$('copy').addEventListener('click', async () => {
+  const json = JSON.stringify({ mood: moodSel.value, intensity: +$('intensity').value, pitch: voice.config.pitch, speed: voice.config.speed, volume: voice.config.volume,
+    vowelColour: voice.config.formant.amount, softness: voice.config.voice.softness, vibrato: voice.config.voice.vibrato,
+    ringMod: voice.config.ringMod.amount, bitcrush: voice.config.bitcrush.amount, style: voice.config.style }, null, 2);
+  const d = $('dump'); d.hidden = false; d.textContent = json;
+  try { await navigator.clipboard.writeText(json); d.textContent = json + '\n\n(copied)'; } catch { /* the text is on screen */ }
+});
+
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && voice.context) voice.context.resume().catch(() => {}); });
+
+// ---------------------------------------------------------------- output meter, test tone, and (with ?diag=1) a self-test that reports what it measured
+const meterBar = $('meterBar'), audioStatus = $('audioStatus');
+let peakSinceTap = 0;
+(function meter() {
+  const c = voice.context;
+  if (c) {
+    const l = voice.level();
+    peakSinceTap = Math.max(peakSinceTap, l.peak);
+    meterBar.style.width = Math.min(100, Math.round(Math.sqrt(l.rms) * 160)) + '%';
+    audioStatus.textContent = `audio: ${c.state} · ${c.sampleRate} Hz · loudest so far ${peakSinceTap.toFixed(2)}`;
+  }
+  requestAnimationFrame(meter);
+})();
+
+/** A plain 440 Hz tone straight to the speakers, bypassing the whole voice: if you hear this, your sound works. */
+function testTone() {
+  voice.unlock();
+  const c = voice.context, o = c.createOscillator(), g = c.createGain();
+  o.frequency.value = 440; g.gain.setValueAtTime(0.0001, c.currentTime); g.gain.linearRampToValueAtTime(0.12, c.currentTime + 0.03); g.gain.linearRampToValueAtTime(0.0001, c.currentTime + 0.5);
+  o.connect(g); g.connect(c.destination); o.start(); o.stop(c.currentTime + 0.55);
+  return o;
+}
+$('testTone').addEventListener('click', () => { token++; testTone(); });
+
+const DIAG = new URLSearchParams(location.search).has('diag');
+const diag = (tag, obj = {}) => { if (!DIAG) return; try { new Image().src = 'http://127.0.0.1:5399/d?' + encodeURIComponent(JSON.stringify({ tag, ...obj })); } catch { /* the listener is not running */ } };
+if (DIAG) {
+  window.addEventListener('error', (e) => diag('error', { msg: e.message, at: (e.filename || '').split('/').pop() + ':' + e.lineno }));
+  window.addEventListener('unhandledrejection', (e) => diag('rejection', { msg: String(e.reason && e.reason.stack || e.reason) }));
+  diag('load', { ua: navigator.userAgent, brave: !!navigator.brave, style: voice.config.style });
+}
+async function selfTest() {
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const c = voice.context, R = { state: c.state, rate: c.sampleRate, baseLatency: c.baseLatency, outLatency: c.outputLatency };
+  try {
+    const nb = c.createBuffer(1, 2048, c.sampleRate), d = nb.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = i % 2 ? 0.5 : -0.5;
+    R.bufferKeepsWrites = Math.abs(nb.getChannelData(0)[1] - 0.5) < 1e-6;                      // false would mean the browser hands out copies (anti-fingerprinting)
+    const nb2 = c.createBuffer(1, 2048, c.sampleRate); nb2.copyToChannel(Float32Array.from(d), 0);
+    R.copyToChannelWorks = Math.abs(nb2.getChannelData(0)[1] - 0.5) < 0.01;                    // the safe way to fill a buffer
+  } catch (e) { R.bufferErr = String(e); }
+  const peak = async (ms) => { let p = 0, r = 0; const t0 = performance.now(); while (performance.now() - t0 < ms) { const l = voice.level(); p = Math.max(p, l.peak); r = Math.max(r, l.rms); await wait(20); } return { peak: +p.toFixed(4), rms: +r.toFixed(4) }; };
+  try {
+    const raw = c.createAnalyser(), o = c.createOscillator(), g = c.createGain(); g.gain.value = 0.1; o.connect(g); g.connect(raw); raw.connect(c.destination); o.start(); o.stop(c.currentTime + 0.4);
+    const buf = new Float32Array(raw.fftSize); let rp = 0; const t0 = performance.now(); while (performance.now() - t0 < 350) { raw.getFloatTimeDomainData(buf); for (const v of buf) rp = Math.max(rp, Math.abs(v)); await wait(20); }
+    R.rawToneAtAnalyser = +rp.toFixed(4);
+  } catch (e) { R.rawErr = String(e); }
+  try { const ms = voice.robotSpeak('Hi! I missed you!', { mood: 'neutral' }); R.speakMs = ms; R.voice = await peak(ms + 200); } catch (e) { R.speakErr = String(e && e.stack || e); }
+  try { const ms = voice.effects.giggle(); R.giggle = await peak(ms + 150); } catch (e) { R.fxErr = String(e && e.stack || e); }
+  try { voice.style; voice.setStyle('chirp'); const ms = voice.robotSpeak('Hi! I missed you!', { mood: 'neutral' }); R.chirp = await peak(ms + 200); voice.setStyle(styleSel.value); } catch (e) { R.chirpErr = String(e); }
+  R.stateAfter = c.state;
+  diag('selftest', R);
+  return R;
+}
+
+// ---------------------------------------------------------------- wake
+$('wakeBtn').addEventListener('click', () => {
+  if (!voice.unlock()) { $('wakeBtn').textContent = 'This browser has no Web Audio'; return; }
+  $('wake').classList.add('gone');
+  stage.classList.remove('asleep');
+  setLook('neutral');
+  const ms = voice.effects.powerUp();
+  faceTalk(ms, 'excited');
+  setTimeout(() => setLook('neutral'), ms + 100);
+  if (DIAG) setTimeout(() => { selfTest(); }, ms + 600);
+});
+
+window.lab = { voice, say, playFx, tour, token: () => token, sliders, styleSel };
+</script>
+</body>
+</html>

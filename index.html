@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#03050a">
+  <meta name="color-scheme" content="dark">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Quark</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app" data-page="home">
+    <!-- everything that shakes, cracks and glows lives in #world -->
+    <div id="world" class="world">
+      <div class="ambient"></div>
+      <div id="faceMount" class="face-mount"></div>
+      <div id="gameLayer" class="game-layer"></div>
+      <div id="fxLayer" class="fx-layer"></div>
+      <div class="glass"></div>
+    </div>
+
+    <!-- full-screen pages that cover the robot: the Home grid and Settings (built by js/home.js) -->
+    <section id="home" class="page home" aria-label="Home"></section>
+    <section id="settings" class="page settings" aria-label="Settings"></section>
+    <section id="voice" class="page settings" aria-label="Voice Connection"></section>
+
+    <!-- invisible layer that owns all pointer input (so shaking the world never moves the touch point) -->
+    <div id="stage" class="touch-layer"></div>
+
+    <div id="subtitles" class="subtitles" aria-live="polite"></div>
+    <div id="hint" class="hint"></div>
+
+    <div id="hud" class="hud">
+      <div class="hud-group">
+        <button id="homeBtn" class="hud-btn" type="button" aria-label="Home">
+          <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11.5 12 5l8 6.5V19a1 1 0 0 1-1 1h-4v-5H9v5H5a1 1 0 0 1-1-1z"/></svg>
+        </button>
+        <button id="eyeBtn" class="hud-btn" type="button" aria-label="Let Quark see me" aria-pressed="false">
+          <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+        <button id="labBtn" class="hud-btn" type="button" aria-label="Test lab" hidden>
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+        </button>
+      </div>
+      <!-- always visible while the camera is on, with a one-tap way to turn it off -->
+      <div id="camPill" class="cam-pill" hidden data-state="off" role="status">
+        <i class="cam-dot"></i><span id="camLabel">Camera on</span>
+        <button id="eyesOffBtn" type="button">Eyes off</button>
+      </div>
+      <button id="soundBtn" class="hud-btn" type="button" aria-label="Sound" aria-pressed="true">
+        <svg class="ic-on" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a8 8 0 0 1 0 11"/></svg>
+        <svg class="ic-off" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></svg>
+      </button>
+    </div>
+
+    <!-- talk to Quark: voice first, keyboard as the fallback -->
+    <form id="typeBar" class="type-bar" hidden autocomplete="off">
+      <input id="typeInput" type="text" maxlength="400" enterkeyhint="send" autocomplete="off" autocapitalize="sentences" placeholder="Say something…">
+      <button class="send-btn" type="submit" aria-label="Send">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </button>
+    </form>
+
+    <div id="dock" class="dock">
+      <button id="kbBtn" class="dock-btn" type="button" aria-label="Type to Quark" aria-pressed="false">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2.5"/><path d="M7 10h.01M10.5 10h.01M14 10h.01M17 10h.01M7.5 14h9"/></svg>
+      </button>
+      <button id="micBtn" class="mic-btn" type="button" aria-label="Talk to Quark" aria-pressed="false" data-state="idle">
+        <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
+      </button>
+      <button id="wakeBtn" class="dock-btn" type="button" aria-label="Hands-free: say Hey Quark" aria-pressed="false">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 12h1.5M8 8.5v7M12 5v14M16 8.5v7M19 12h1.5"/></svg>
+      </button>
+    </div>
+
+    <div id="consent" class="consent" hidden role="dialog" aria-modal="true" aria-labelledby="consentTitle">
+      <div class="consent-card">
+        <h3 id="consentTitle">Let Quark see you?</h3>
+        <p>Quark uses your front camera to follow you with its eyes and notice waves, thumbs-ups and jumps.
+           Everything happens on this device. No video, pictures or tracking data are ever uploaded or saved.
+           The camera is off until you say yes, and one tap on “Eyes off” turns it off again.</p>
+        <div class="consent-actions">
+          <button id="consentYes" class="btn primary" type="button">Let Quark see me</button>
+          <button id="consentNo" class="btn" type="button">Not now</button>
+        </div>
+      </div>
+    </div>
+
+    <aside id="dev" class="dev" hidden></aside>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

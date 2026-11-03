@@ -1,0 +1,22 @@
+// Wake-phrase matching. Run: node tests/wake.mjs
+const { matchWake } = await import('../js/listen.js');
+let pass = 0, fail = 0;
+const eq = (got, want, name) => { const ok = JSON.stringify(got) === JSON.stringify(want); ok ? pass++ : (fail++, console.log('FAIL', name, JSON.stringify(got), '!=', JSON.stringify(want))); };
+const w = (t, n = 'Quark') => { const m = matchWake(t, n); return m ? m.rest : null; };
+eq(w("hey quark what's up"), "what's up", 'hey + name');
+eq(w('hey quirk tell me a joke'), 'tell me a joke', 'mishearing after hey');
+eq(w('okay quark how was your day'), 'how was your day', 'okay + name');
+eq(w('quark how was your day'), 'how was your day', 'name first');
+eq(w('Quark, how was your day?'), 'how was your day', 'name first with punctuation');
+eq(w('how was your day'), null, 'ordinary sentence is not a wake phrase');
+eq(w('work is exhausting today'), null, 'a sentence starting with "work" does not wake it');
+eq(w('park the car over there'), null, 'a sentence starting with "park" does not wake it');
+eq(w('hey work tell me something'), 'tell me something', 'weak mishearing is fine after hey');
+eq(w('hello quark'), '', 'greeting alone');
+eq(w('quark'), null, 'the name alone with nothing after it is not enough');
+eq(w('hey bolt jr what is new', 'Bolt Jr'), 'what is new', 'two-word name');
+eq(w('hey boltjr what is new', 'Bolt Jr'), 'what is new', 'two-word name heard as one word');
+eq(w('hey chat gpt sucks tell me a joke', 'chatgpt sucks'), 'tell me a joke', 'three-word name');
+eq(w('I think quark is cool'), null, 'name in the middle without hey does not wake it');
+eq(w('hey you there'), null, 'greeting without the name');
+console.log(`${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0);

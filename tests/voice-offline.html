@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Quark voice: offline measurements</title>
+<style>body{background:#05070c;color:#cfe0f5;font:13px/1.45 ui-monospace,Menlo,monospace;padding:16px;white-space:pre-wrap}.ok{color:#7be28a}.bad{color:#ff6b6b}h2{color:#7fe9ff;font-size:14px;margin:18px 0 6px}</style>
+</head>
+<body>
+<div id="out">running…</div>
+<script type="module">
+// Renders the synth through the real Web Audio graph in an OfflineAudioContext (no speakers needed) and measures the result.
+// Everything is deterministic: Math.random is replaced by a seeded generator while rendering.
+import { createRobotVoice, MOOD_NAMES, moodParams, letterSemis, VOICE_CONFIG } from '../js/robotvoice.js';
+
+const SR = 44100;
+const STYLE = new URLSearchParams(location.search).get('style') === 'chirp' ? 'chirp' : 'voice';      // which voice engine is under test
+const out = document.getElementById('out');
+const lines = [];
+const results = { done: false, checks: [], tables: {} };
+window.__voice = results;
+const log = (s = '') => { lines.push(s); out.innerHTML = lines.join('\n'); };
+const h2 = (s) => log(`<h2>${s}</h2>`);
+function check(name, pass, detail = '') {
+  results.checks.push({ name, pass: !!pass, detail });
+  log(`<span class="${pass ? 'ok' : 'bad'}">${pass ? 'PASS' : 'FAIL'}</span>  ${name}${detail ? '  — ' + detail : ''}`);
+}
+
+// ---- deterministic randomness
+function mulberry32(a) { return () => { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+const realRandom = Math.random;
+
+async function render(secs, fn, cfg) {
+  Math.random = mulberry32(12345);
+  const ctx = new OfflineAudioContext(1, Math.ceil(SR * secs), SR);
+  const v = createRobotVoice({ ctx, offline: true });
+  v.setStyle(STYLE);
+  if (cfg) cfg(v.config);
+  const ret = fn(v);
+  const buf = await ctx.startRendering();
+  return { x: buf.getChannelData(0), ret, v };
+}
+
+// ---- DSP helpers
+function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang), half = len >> 1;
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < half; k++) {
+        const a = i + k, b = a + half;
+        const vr = re[b] * cr - im[b] * ci, vi = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - vr; im[b] = im[a] - vi; re[a] += vr; im[a] += vi;
+        const nc = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nc;
+      }
+    }
+  }
+}
+function magnitude(x, start, n) {                                          // Hann-windowed magnitude spectrum, n/2 bins
+  const re = new Float64Array(n), im = new Float64Array(n);
+  for (let i = 0; i < n; i++) re[i] = (x[start + i] || 0) * (0.5 - 0.5 * Math.cos(2 * Math.PI * i / (n - 1)));
+  fft(re, im);
+  const m = new Float64Array(n / 2);
+  for (let i = 0; i < m.length; i++) m[i] = Math.hypot(re[i], im[i]);
+  return m;
+}
+const quant = (arr, q) => { if (!arr.length) return NaN; const s = [...arr].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; };
+const mean = (a) => a.reduce((s, v) => s + v, 0) / (a.length || 1);
+const db = (v) => 20 * Math.log10(Math.max(v, 1e-9));
+const peakOf = (x) => { let p = 0; for (let i = 0; i < x.length; i++) { const a = Math.abs(x[i]); if (a > p) p = a; } return p; };
+
+function pitchTrack(x, hop = 441, win = 1536) {
+  const frames = [];
+  for (let s = 0; s + win + 300 <= x.length; s += hop) {
+    let e0 = 0;
+    for (let j = 0; j < win; j++) e0 += x[s + j] * x[s + j];
+    const rms = Math.sqrt(e0 / win);
+    const f = { t: (s + win / 2) / SR, rms, f: 0 };
+    if (rms > 0.004) {
+      const r = new Float64Array(301);                                      // lags 12..300 = 147 Hz to 3.7 kHz
+      let best = 0;
+      for (let lag = 12; lag <= 300; lag++) {
+        let c = 0, e1 = 0;
+        for (let j = 0; j < win; j++) { c += x[s + j] * x[s + j + lag]; e1 += x[s + j + lag] * x[s + j + lag]; }
+        r[lag] = c / Math.sqrt(e0 * e1 + 1e-12);
+        if (r[lag] > best) best = r[lag];
+      }
+      if (best > 0.55) {
+        let lag = 12;
+        while (lag <= 300 && r[lag] < best * 0.92) lag++;                  // the shortest lag that is nearly as good: avoids octave-down errors
+        while (lag < 300 && r[lag + 1] > r[lag]) lag++;
+        f.f = SR / lag;
+      }
+    }
+    frames.push(f);
+  }
+  return frames;
+}
+
+function features(x) {
+  const frames = pitchTrack(x);
+  const voiced = frames.filter((f) => f.f);
+  const st = voiced.map((f) => 12 * Math.log2(f.f / 440));
+  let first = 0, last = x.length - 1;
+  while (first < x.length && Math.abs(x[first]) < 0.004) first++;
+  while (last > 0 && Math.abs(x[last]) < 0.004) last--;
+  const durMs = Math.max(0, (last - first) / SR * 1000);
+  // chirps per second: rising edges of a smoothed envelope
+  const w = Math.round(SR * 0.004), env = new Float32Array(Math.floor(x.length / w));
+  for (let i = 0; i < env.length; i++) { let s = 0; for (let j = 0; j < w; j++) s += Math.abs(x[i * w + j]); env[i] = s / w; }
+  const mx = Math.max(...env), hi = mx * 0.2, lo = mx * 0.08;
+  let on = 0, up = false;
+  for (const v of env) { if (!up && v > hi) { up = true; on++; } else if (up && v < lo) up = false; }
+  // brightness over the sounding part
+  const N = 2048, avg = new Float64Array(N / 2);
+  let nfr = 0;
+  for (let s = first; s + N < last; s += 1024) { const m = magnitude(x, s, N); for (let i = 0; i < avg.length; i++) avg[i] += m[i]; nfr++; }
+  let num = 0, den = 0, hf = 0;
+  for (let i = 1; i < avg.length; i++) { const f = i * SR / N, e = avg[i] * avg[i]; num += f * e; den += e; if (f > 2000) hf += e; }
+  // loudness drift: last third vs first third of the sounding part
+  const rmsOf = (a, b) => { let s = 0; for (let i = a; i < b; i++) s += x[i] * x[i]; return Math.sqrt(s / Math.max(1, b - a)); };
+  // loudness drift: how loud the loud notes are in the last third vs the first third (95th percentile of the envelope, so pauses and quiet consonants don't count)
+  const e0 = Math.floor(first / w), e1 = Math.floor(last / w), eThird = Math.floor((e1 - e0) / 3);
+  const p95 = (a, b) => quant(Array.from(env.slice(a, b)), 0.95);
+  const drift = db(p95(e1 - eThird, e1)) - db(p95(e0, e0 + eThird));
+  // flatness of the averaged spectrum between 300 Hz and 6 kHz: 0 = a few clean tones, 1 = noise. Harsh, buzzy sounds are flatter.
+  let lg = 0, ar = 0, nb = 0;
+  for (let i = Math.floor(300 * N / SR); i < Math.floor(6000 * N / SR); i++) { const pw = avg[i] * avg[i] + 1e-12; lg += Math.log(pw); ar += pw; nb++; }
+  const flatness = Math.exp(lg / nb) / (ar / nb);
+  // pitch movement at the very end: median of the last 3 voiced frames minus the 3 before them
+  // how the very end moves: the last 80 ms of pitch against the stretch 380-180 ms before it
+  const T = voiced.length ? voiced[voiced.length - 1].t : 0;
+  const endHz = quant(voiced.filter((f) => f.t > T - 0.08).map((f) => f.f), 0.5), beforeHz = quant(voiced.filter((f) => f.t < T - 0.18 && f.t > T - 0.38).map((f) => f.f), 0.5);
+  const endSlope = Number.isFinite(endHz / beforeHz) ? 12 * Math.log2(endHz / beforeHz) : 0;
+  return {
+    pitchHz: 440 * Math.pow(2, quant(st, 0.5) / 12), pitchSpread: quant(st, 0.9) - quant(st, 0.1), durMs, chirpsPerSec: on / (durMs / 1000),
+    centroid: num / den, hfShare: hf / den, rmsDb: db(rmsOf(first, last)), driftDb: drift, flatness, endSlope, peak: peakOf(x),
+  };
+}
+
+/** Pitch over time from the timing of rising zero crossings (interpolated between samples): accurate to a few cents on a clean wave. */
+function crossingSeries(x) {
+  const t = [], amp = [];
+  let peak = 0, lastI = 0;
+  for (let i = 1; i < x.length; i++) {
+    const a = Math.abs(x[i]); if (a > peak) peak = a;
+    if (x[i - 1] < 0 && x[i] >= 0 && x[i] - x[i - 1] > 1e-5) {
+      t.push((i - 1 + (-x[i - 1]) / (x[i] - x[i - 1])) / SR);
+      let m = 0; for (let j = lastI; j < i; j++) m = Math.max(m, Math.abs(x[j]));
+      amp.push(m); lastI = i;
+    }
+  }
+  const pts = [];
+  for (let k = 1; k < t.length; k++) {
+    const f = 1 / (t[k] - t[k - 1]);
+    if (f > 100 && f < 4500) pts.push({ t: (t[k] + t[k - 1]) / 2, st: 12 * Math.log2(f / 440), amp: amp[k] / peak });
+  }
+  return pts;
+}
+const CLEAN = (c) => { c.formant.amount = 0; c.ringMod.amount = 0; c.bitcrush.amount = 0; c.space.mix = 0; c.space.feedback = 0; c.lowpass = 12000; };
+
+/**
+ * One long vowel (only the chirp itself, not any ending lift): how far its pitch glides (semitones, end minus start) and how much it
+ * wobbles (rms cents around a straight glide). Stray crossings are rejected against the median of their neighbours.
+ */
+function glideStats(x, t0, t1) {
+  const pts = crossingSeries(x).filter((p) => p.amp > 0.4 && p.t >= t0 && p.t <= t1);
+  if (pts.length < 8) return { glide: 0, wobble: 0, n: pts.length };
+  const keep = pts.filter((p, i) => Math.abs(p.st - quant(pts.slice(Math.max(0, i - 4), i + 5).map((q) => q.st), 0.5)) < 1.5);
+  const mt = mean(keep.map((p) => p.t)), my = mean(keep.map((p) => p.st));
+  let num = 0, den = 0;
+  for (const p of keep) { num += (p.t - mt) * (p.st - my); den += (p.t - mt) ** 2; }
+  const slope = num / den, icpt = my - slope * mt;
+  const resid = keep.map((p) => p.st - (icpt + slope * p.t));
+  return { glide: slope * (keep[keep.length - 1].t - keep[0].t), wobble: Math.sqrt(mean(resid.map((r) => r * r))) * 100, n: keep.length };
+}
+
+/** The biggest continuous upward glide (semitones) in the last 450 ms: the "hm?" lift. Jumps between separate chirps do not count. */
+function endSweep(x) {
+  const pts = crossingSeries(x).filter((p) => p.amp > 0.1);
+  if (pts.length < 4) return 0;
+  const T = pts[pts.length - 1].t, tail = pts.filter((p) => p.t > T - 0.45);
+  let best = 0, start = 0;
+  for (let i = 1; i <= tail.length; i++) {
+    if (i === tail.length || Math.abs(tail[i].st - tail[i - 1].st) > 0.8) {          // a jump: the run [start, i) was one glide
+      let lo = tail[start].st, hi = lo;
+      for (let k = start; k < i; k++) { lo = Math.min(lo, tail[k].st); hi = Math.max(hi, tail[k].st); }
+      if (tail[i - 1].st > tail[start].st) best = Math.max(best, tail[i - 1].st - tail[start].st);
+      start = i;
+    }
+  }
+  return best;
+}
+
+window.__dbg = { render, pitchTrack, features, glideStats, SR };
+const f1 = (n) => (Number.isFinite(n) ? n.toFixed(1) : String(n));
+function table(rows, cols) {
+  const head = ['name', ...cols.map((c) => c[0])];
+  const pad = (s, n) => String(s).padEnd(n);
+  const widths = head.map((h, i) => Math.max(h.length, ...rows.map((r) => String(i ? cols[i - 1][1](r.f) : r.name).length)));
+  log(head.map((h, i) => pad(h, widths[i])).join('  '));
+  for (const r of rows) log([r.name, ...cols.map((c) => c[1](r.f))].map((s, i) => pad(s, widths[i])).join('  '));
+}
+
+// Pitch is measured on the tone layer alone (formant amount 0): the formant layer deliberately adds a lower octave, which would
+// fool any pitch tracker. Everything else (speed, brightness, loudness, fade) is measured on the voice exactly as you hear it.
+async function moodFeatures(sentence, opts) {
+  const a = await render(6, (v) => v.robotSpeak(sentence, opts));
+  const b = await render(6, (v) => v.robotSpeak(sentence, opts), (c) => { c.formant.amount = 0; });
+  const gText = STYLE === 'chirp' ? 'a' : 'a a';                                               // pet voice: the first vowel of two (the last one of a phrase falls or rises)
+  const g = await render(2, (v) => v.robotSpeak(gText, { ...opts, speed: 0.2 }), (c) => { CLEAN(c); c.speed = 0.2; });          // one long vowel, so slow wobbles get several cycles
+  const c = await render(6, (v) => v.robotSpeak(sentence, opts), CLEAN);
+  const gp = g.v.plan(gText, opts.mood, opts.intensity), e0 = STYLE === 'chirp' ? gp.events[0] : { t: gp.nuclei[0].t0, dur: gp.nuclei[0].t1 - gp.nuclei[0].t0 }, fa = features(a.x), fb = features(b.x), gl = glideStats(g.x, 0.06 + e0.t, 0.06 + e0.t + e0.dur);
+  return { ...fa, pitchHz: fb.pitchHz, pitchSpread: fb.pitchSpread, endSweep: endSweep(c.x), glide: gl.glide, wobble: gl.wobble, ret: a.ret };
+}
+
+async function run() {
+  const SENTENCE = 'Hi! I missed you!';
+
+  // ======================================================= 1. the same sentence in all 11 moods
+  h2('1. Same sentence ("' + SENTENCE + '") in all 11 moods, rendered and measured');
+  const rows = [];
+  for (const mood of MOOD_NAMES) {
+    rows.push({ name: mood, f: await moodFeatures(SENTENCE, { mood, intensity: 85 }) });
+  }
+  table(rows, [
+    ['pitch Hz', (f) => f1(f.pitchHz)], ['spread st', (f) => f1(f.pitchSpread)], ['len ms', (f) => f1(f.durMs)], ['returned ms', (f) => f.ret],
+    ['chirps/s', (f) => f1(f.chirpsPerSec)], ['bright Hz', (f) => f1(f.centroid)], ['hf %', (f) => f1(f.hfShare * 100)], ['loud dB', (f) => f1(f.rmsDb)],
+    ['fade dB', (f) => f1(f.driftDb)], ['end sweep st', (f) => f1(f.endSweep)], ['glide st', (f) => f1(f.glide)], ['wobble c', (f) => f1(f.wobble)], ['flat', (f) => f.flatness.toFixed(3)], ['peak', (f) => f1(f.peak)],
+  ]);
+  results.tables.moods = rows;
+  const M = Object.fromEntries(rows.map((r) => [r.name, r.f]));
+
+  log('\nWhat each mood should do, checked on the audio:');
+  check('happy is higher than neutral', M.happy.pitchHz > M.neutral.pitchHz * 1.05, `${f1(M.happy.pitchHz)} vs ${f1(M.neutral.pitchHz)} Hz`);
+  check('excited is higher and faster than happy', M.excited.pitchHz > M.happy.pitchHz && M.excited.durMs < M.happy.durMs, `${f1(M.excited.pitchHz)} Hz, ${f1(M.excited.durMs)} ms`);
+  check('sad is lower and slower than neutral', M.sad.pitchHz < M.neutral.pitchHz * 0.9 && M.sad.durMs > M.neutral.durMs * 1.3, `${f1(M.sad.pitchHz)} Hz, ${f1(M.sad.durMs)} ms`);
+  check('sulky is low and darker than neutral', M.sulky.pitchHz < M.neutral.pitchHz * 0.9 && M.sulky.centroid < M.neutral.centroid, `${f1(M.sulky.pitchHz)} Hz, ${f1(M.sulky.centroid)} Hz bright`);
+  check('angry is buzzier (spectrum at least 40% flatter than neutral), louder and faster than neutral', M.angry.flatness > M.neutral.flatness * 1.4 && M.angry.rmsDb > M.neutral.rmsDb + 1.5 && M.angry.durMs < M.neutral.durMs * 0.8, `flatness ${M.angry.flatness.toFixed(3)} vs ${M.neutral.flatness.toFixed(3)}, ${f1(M.angry.rmsDb)} vs ${f1(M.neutral.rmsDb)} dB, ${f1(M.angry.durMs)} vs ${f1(M.neutral.durMs)} ms`);
+  check('sleepy is the slowest and its loud notes fade by at least 3 dB', M.sleepy.durMs === Math.max(...rows.map((r) => r.f.durMs)) && M.sleepy.driftDb < -3 && M.sleepy.driftDb < M.neutral.driftDb - 3, `${f1(M.sleepy.durMs)} ms, fade ${f1(M.sleepy.driftDb)} dB (neutral ${f1(M.neutral.driftDb)})`);
+  check('scared is fast, high and shaky (wide pitch spread)', M.scared.durMs < M.neutral.durMs && M.scared.pitchHz > M.neutral.pitchHz && M.scared.pitchSpread > M.neutral.pitchSpread, `spread ${f1(M.scared.pitchSpread)} vs ${f1(M.neutral.pitchSpread)} st`);
+  check('shy is high but quiet and slower than scared', M.shy.pitchHz > M.neutral.pitchHz && M.shy.rmsDb < M.neutral.rmsDb - 1.5 && M.shy.durMs > M.scared.durMs, `${f1(M.shy.rmsDb)} dB vs ${f1(M.neutral.rmsDb)} dB`);
+  check('smug is lower, slower and smoother (less pitch spread) than neutral', M.smug.pitchHz < M.neutral.pitchHz && M.smug.durMs > M.neutral.durMs && M.smug.pitchSpread < M.neutral.pitchSpread, `${f1(M.smug.pitchHz)} Hz, ${f1(M.smug.durMs)} ms, spread ${f1(M.smug.pitchSpread)} vs ${f1(M.neutral.pitchSpread)} st`);
+  check('curious ends with a bigger rising sweep than neutral (at least 2 semitones more)', M.curious.endSweep > M.neutral.endSweep + 2, `${f1(M.curious.endSweep)} vs ${f1(M.neutral.endSweep)} st`);
+  check('glides: sad droops, neutral rises, happy rises more, curious rises most', M.sad.glide < -0.8 && M.neutral.glide > 0.9 && M.happy.glide > M.neutral.glide && M.curious.glide > M.happy.glide, `sad ${f1(M.sad.glide)}, neutral ${f1(M.neutral.glide)}, happy ${f1(M.happy.glide)}, curious ${f1(M.curious.glide)} st`);
+  const plainWobble = rows.filter((r) => !['scared', 'happy', 'excited'].includes(r.name));       // happy and excited have an octave-up sparkle layer that fools this measure
+  check('scared trembles most: at least 1.5x the wobble of every mood without the sparkle layer', M.scared.wobble > 1.5 * Math.max(...plainWobble.map((r) => r.f.wobble)), `scared ${f1(M.scared.wobble)} cents; others up to ${f1(Math.max(...plainWobble.map((r) => r.f.wobble)))} (${plainWobble.map((r) => r.name + ' ' + f1(r.f.wobble)).join(', ')})`);
+  // pitch flatness: the pet voice's contour is small, so measure it on the planned syllable pitches (the audio is shown to follow the plan by the glide / sweep checks); the chirps are measured on the audio
+  const planSpread = (mood) => { const pv = createRobotVoice({ ctx: new OfflineAudioContext(1, 100, SR), offline: true }); pv.setStyle(STYLE); Math.random = mulberry32(99); const ns = pv.plan('I do not want to talk to you right now because I am busy today', mood, 85).nuclei || []; const mids = ns.map((n) => (n.st[0] + n.st[1]) / 2), m = mean(mids); return Math.sqrt(mean(mids.map((v) => (v - m) ** 2))); };
+  const flatOk = STYLE === 'chirp' ? M.sulky.pitchSpread < M.neutral.pitchSpread * 0.85 : planSpread('sulky') < planSpread('neutral') * 0.6;
+  check('sulky is flat: a much narrower pitch contour than neutral and almost no glide', flatOk && Math.abs(M.sulky.glide) < Math.abs(M.neutral.glide) / 2, `spread ${f1(M.sulky.pitchSpread)} st, glide ${f1(M.sulky.glide)} st`);
+
+  // every pair differs on enough measurable properties to tell apart without looking
+  const keys = ['pitchHz', 'pitchSpread', 'durMs', 'chirpsPerSec', 'centroid', 'hfShare', 'rmsDb', 'driftDb', 'flatness', 'endSweep', 'glide', 'wobble'];
+  const logKeys = new Set(['pitchHz', 'durMs', 'centroid', 'chirpsPerSec']);
+  const val = (r, k) => (logKeys.has(k) ? Math.log(r.f[k]) : r.f[k]);
+  const sd = Object.fromEntries(keys.map((k) => { const vs = rows.map((r) => val(r, k)); const m = mean(vs); return [k, Math.sqrt(mean(vs.map((v) => (v - m) ** 2))) || 1]; }));
+  let closest = { d: 1e9 };
+  const pairs = [];
+  for (let i = 0; i < rows.length; i++) for (let j = i + 1; j < rows.length; j++) {
+    let d = 0, diff = 0;
+    for (const k of keys) { const z = (val(rows[i], k) - val(rows[j], k)) / sd[k]; d += z * z; if (Math.abs(z) > 0.6) diff++; }
+    d = Math.sqrt(d);
+    pairs.push({ a: rows[i].name, b: rows[j].name, d, diff });
+    if (d < closest.d) closest = { a: rows[i].name, b: rows[j].name, d, diff };
+  }
+  pairs.sort((a, b) => a.d - b.d);
+  log('\nClosest mood pairs (distance in units of spread across all moods; "differs" = measured properties, out of 12, that differ clearly):');
+  pairs.slice(0, 6).forEach((p) => log(`  ${p.a} / ${p.b}: distance ${f1(p.d)}, differs on ${p.diff}/12`));
+  check('no two moods are acoustically close: every pair differs clearly on at least 2 of 12 measured properties', pairs.every((p) => p.diff >= 2), `closest ${closest.a}/${closest.b} (${closest.diff}/12)`);
+  results.closestPair = closest;
+
+  // intensity scales the effect
+  h2('Intensity scales the mood');
+  const levels = [];
+  for (const k of [0, 25, 50, 75, 100]) {
+    levels.push({ k, ...(await moodFeatures(SENTENCE, { mood: 'excited', intensity: k })) });
+  }
+  log('excited @ intensity: ' + levels.map((l) => `${l.k}% → ${f1(l.pitchHz)} Hz / ${f1(l.durMs)} ms`).join('   |   '));
+  const neutralF = M.neutral;
+  check('intensity 0 sounds like neutral', Math.abs(levels[0].pitchHz / neutralF.pitchHz - 1) < 0.06 && Math.abs(levels[0].durMs / neutralF.durMs - 1) < 0.12, `${f1(levels[0].pitchHz)} Hz vs ${f1(neutralF.pitchHz)}`);
+  check('pitch rises and speech gets faster as intensity goes up', levels.every((l, i) => !i || (l.pitchHz >= levels[i - 1].pitchHz * 0.98 && l.durMs <= levels[i - 1].durMs * 1.02)) && levels[4].pitchHz > levels[0].pitchHz * 1.15);
+
+  // ======================================================= 2. the five vowels
+  h2('2. The five vowels (each at one steady pitch, so only the formant colour differs), at four different pitches');
+  const edges = []; for (let f = 220; f < 3600; f *= Math.pow(2, 1 / 3)) edges.push(f);
+  const dist = (a, b) => Math.sqrt(mean(a.map((x, i) => (x - b[i]) ** 2)));
+  async function vowelStudy(cfg, hz) {
+    const vecs = {};
+    for (const v of 'aeiou') {
+      const { x } = await render(1, (voice) => voice.effects.vowel(v, hz), cfg);
+      const N = 16384, m = magnitude(x, Math.round(SR * 0.12), N);
+      const bands = edges.slice(0, -1).map((lo, i) => { let e = 0; for (let b = Math.floor(lo * N / SR); b < Math.ceil(edges[i + 1] * N / SR); b++) e += m[b] * m[b]; return 10 * Math.log10(e + 1e-9); });
+      const mu = mean(bands);
+      const centre = (lo, hi) => { let a = 0, b = 0; for (let k = Math.floor(lo * N / SR); k < Math.ceil(hi * N / SR); k++) { a += (k * SR / N) * m[k] * m[k]; b += m[k] * m[k]; } return a / b; };
+      const fr = pitchTrack(x).filter((f) => f.f && f.t > 0.12 && f.t < 0.45);
+      vecs[v] = { v: bands.map((b) => b - mu), f1: centre(250, 1100), f2: centre(1100, 2500), ctr: centre(250, 3300), tracked: quant(fr.map((f) => f.f), 0.5) };
+    }
+    const pairs = [];
+    for (const a of 'aeiou') for (const b of 'aeiou') if (a < b) pairs.push({ pair: a + b, d: dist(vecs[a].v, vecs[b].v) });
+    pairs.sort((p, q) => p.d - q.d);
+    const octErr = 'aeiou'.split('').filter((v) => !(Math.abs(vecs[v].tracked / hz - 1) < 0.05));
+    return { vecs, pairs, minD: pairs[0].d, worst: pairs[0].pair, octErr };
+  }
+  const PITCHES = [330, 520, 780, 1040];
+  results.matrix = {};
+  if (STYLE === 'chirp') {
+  log('Tuning matrix (min vowel-pair difference in dB / vowels whose pitch the tracker finds an octave away):');
+  const variants = { 'now (no fold, Q 4, makeup 8)': () => {}, 'Q 2.5': (c) => { c.formant.Q = 2.5; }, 'makeup 3': (c) => { c.formant.makeup = 3; }, 'makeup 5': (c) => { c.formant.makeup = 5; }, 'fold 620': (c) => { c.formant.maxSource = 620; } };
+  for (const [name, cfg] of Object.entries(variants)) {
+    const cells = [];
+    for (const hz of PITCHES) { const r = await vowelStudy(cfg, hz); cells.push(`${hz} Hz: ${f1(r.minD)} dB (${r.worst})${r.octErr.length ? ' oct-err:' + r.octErr.join('') : ''}`); results.matrix[name + '@' + hz] = { minD: r.minD, octErr: r.octErr.join('') }; }
+    log(`  ${name.padEnd(36)} ${cells.join('   ')}`);
+  }
+  }
+  log('');
+  const study = {};
+  for (const hz of PITCHES) study[hz] = await vowelStudy(null, hz);
+  const noF = await vowelStudy((c) => { c.formant.amount = 0; }, 330);
+  const w = study[330].vecs;
+  log('vowel  F1-ish centre (250-1100 Hz)   F2-ish centre (1100-2500 Hz)   (target formants: a 800/1200, e 450/1900, i 300/2300, o 500/900, u 320/850)   @330 Hz');
+  for (const v of 'aeiou') log(`  ${v}     ${f1(w[v].f1).padStart(7)} Hz                    ${f1(w[v].f2).padStart(7)} Hz`);
+  for (const hz of PITCHES) log(`  all ten pairs @ ${String(hz).padStart(4)} Hz (dB): ` + study[hz].pairs.map((p) => `${p.pair} ${f1(p.d)}`).join('  '));
+  check('with the formant layer OFF, all five vowels are essentially the same sound (control)', noF.pairs[noF.pairs.length - 1].d < 1.5, `max ${f1(noF.pairs[noF.pairs.length - 1].d)} dB`);
+  for (const hz of PITCHES) {
+    check(`at ${hz} Hz every vowel pair is clearly different (> 3 dB RMS)`, study[hz].minD > 3, `min ${f1(study[hz].minD)} dB (${study[hz].worst})`);
+    check(`at ${hz} Hz the melody stays clear (no octave confusion from the formant layer)`, study[hz].octErr.length === 0, study[hz].octErr.length ? 'octave error on: ' + study[hz].octErr.join(',') : 'all five tracked within 5%');
+  }
+  check('"a" has the highest first-formant centre; "i" and "u" the lowest', w.a.f1 > w.e.f1 && w.a.f1 > w.i.f1 && w.a.f1 > w.u.f1 && w.i.f1 < w.e.f1 && w.u.f1 < w.e.f1);
+  check('"i" and "e" have a higher second-formant centre than "a" and "o"', Math.min(w.i.f2, w.e.f2) > Math.max(w.a.f2, w.o.f2), `i ${f1(w.i.f2)}, e ${f1(w.e.f2)} vs a ${f1(w.a.f2)}, o ${f1(w.o.f2)}`);
+  results.vowels = Object.fromEntries(PITCHES.map((hz) => [hz, { minD: study[hz].minD, pairs: study[hz].pairs }]));
+
+  // ======================================================= 3. every sound effect
+  h2('3. Every sound effect: not silent, no clipping, no NaN, length close to what it reports');
+  const FX = ['happyChirp', 'sadWhimper', 'surprised', 'giggle', 'gasp', 'sigh', 'yawn', 'growlBuzz', 'squeak', 'purr', 'glitchBuzz', 'powerUp', 'whistle', 'hum', 'hmm', 'ooh'];
+  const fxRows = [];
+  for (const name of FX) {
+    const { x, ret } = await render(4, (v) => v.effects[name]());
+    const bad = x.some((s) => !Number.isFinite(s));
+    const ft = features(x);
+    fxRows.push({ name, f: { ...ft, ret, bad } });
+  }
+  table(fxRows, [['reported ms', (f) => f.ret], ['audible ms', (f) => f1(f.durMs)], ['peak', (f) => f1(f.peak)], ['loud dB', (f) => f1(f.rmsDb)], ['bright Hz', (f) => f1(f.centroid)], ['pitch Hz', (f) => f1(f.pitchHz)]]);
+  for (const r of fxRows) {
+    const f = r.f;
+    const lenOk = r.name === 'purr' ? f.durMs > 1500 : Math.abs(f.durMs - f.ret) < Math.max(250, f.ret * 0.35);
+    check(`${r.name} is audible, clean and the right length`, !f.bad && f.peak > 0.02 && f.peak <= 1.0 && f.rmsDb > -50 && lenOk, `peak ${f1(f.peak)}, ${f1(f.rmsDb)} dB, ${f1(f.durMs)} ms (reports ${f.ret})`);
+  }
+  const bcRows = [];
+  for (const type of ['mm', 'ooh', 'huh']) {
+    const { x, ret } = await render(1, (v) => v.backchannel(type));
+    bcRows.push({ type, f: features(x), ret });
+  }
+  for (const r of bcRows) check(`backchannel("${r.type}") is audible but quiet`, r.f.peak > 0.01 && r.f.rmsDb < M.neutral.rmsDb - 3, `${f1(r.f.rmsDb)} dB vs speech ${f1(M.neutral.rmsDb)} dB`);
+  results.tables.fx = fxRows;
+  check('effects are clearly different from each other (all 16 have distinct pitch/length/brightness signatures)', (() => {
+    let minD = 1e9;
+    const k2 = ['durMs', 'centroid'];
+    for (let i = 0; i < fxRows.length; i++) for (let j = i + 1; j < fxRows.length; j++) {
+      const a = fxRows[i].f, b = fxRows[j].f;
+      const d = Math.abs(Math.log(a.durMs / b.durMs)) + Math.abs(Math.log(a.centroid / b.centroid)) + Math.abs(a.pitchHz - b.pitchHz) / 400;
+      if (d < minD) minD = d;
+    }
+    return minD > 0.05;
+  })());
+
+  // ======================================================= 4. letters, punctuation, jitter, config
+  h2('4. Letters, punctuation, pitch variation, config');
+  const base = createRobotVoice({ ctx: new OfflineAudioContext(1, 100, SR), offline: true });
+  base.setStyle(STYLE);
+  Math.random = mulberry32(7);
+  if (STYLE === 'chirp') {
+  const aaa = base.plan('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'neutral').events.filter((e) => e.vowel === 'a');
+  const baseHz = VOICE_CONFIG.pitch * Math.pow(2, letterSemis('a') / 12);
+  const devs = aaa.map((e) => e.freq / baseHz - 1);
+  check('every chirp gets a 3-5% random pitch change (up or down)', devs.length > 20 && devs.every((d) => Math.abs(d) >= 0.0299 && Math.abs(d) <= 0.0501) && devs.some((d) => d > 0) && devs.some((d) => d < 0), `${devs.length} chirps, |dev| ${f1(Math.min(...devs.map(Math.abs)) * 100)}-${f1(Math.max(...devs.map(Math.abs)) * 100)}%`);
+  const vow = base.plan('a', 'neutral').events[0], con = base.plan('b', 'neutral').events[0];
+  check('vowels: triangle wave, longer, glide UP', vow.wave === 'triangle' && vow.freq2 > vow.freq && vow.dur > con.dur * 2, `${vow.wave}, ${f1(vow.dur * 1000)} ms, +${f1((vow.freq2 / vow.freq - 1) * 100)}%`);
+  check('consonants: square wave, shorter, glide DOWN', con.wave === 'square' && con.freq2 < con.freq, `${con.wave}, ${f1(con.dur * 1000)} ms, ${f1((con.freq2 / con.freq - 1) * 100)}%`);
+  const sem = [...'abcdefghijklmnopqrstuvwxyz'].map((c) => letterSemis(c));
+  check('letters a to z climb across a pitch range (never go down, span > 1 octave)', sem.every((s, i) => !i || s >= sem[i - 1]) && sem[25] - sem[0] >= 12, `${sem[0]} to ${sem[25]} semitones`);
+  }
+  const dSpace = base.plan('a b', 'neutral').duration, dComma = base.plan('a, b', 'neutral').duration, dStop = base.plan('a. b', 'neutral').duration;
+  check('space < comma < full stop pauses', dSpace < dComma && dComma < dStop, `${f1(dSpace * 1000)} < ${f1(dComma * 1000)} < ${f1(dStop * 1000)} ms`);
+  const q = await render(3, (v) => v.robotSpeak('Really?', { mood: 'neutral' }), CLEAN), p = await render(3, (v) => v.robotSpeak('Really.', { mood: 'neutral' }), CLEAN);
+  const swQ = endSweep(q.x), swP = endSweep(p.x);
+  if (STYLE === 'chirp') {
+    const lastEvents = (t) => base.plan(t, 'neutral').events;
+    const lq = lastEvents('Really?').pop(), le = lastEvents('Really!').pop();
+    check('"?" ends with a rising glide (a bigger final sweep than "." does)', lq.freq2 > lq.freq * 1.5 && swQ > swP + 3, `final sweep ${f1(swQ)} st vs ${f1(swP)} st for "."`);
+    const rest = lastEvents('Really!').slice(0, -1);
+    check('"!" ends with a louder, higher chirp', le.gain > Math.max(...rest.map((x) => x.gain)) && le.freq > mean(rest.map((x) => x.freq)), `gain ${f1(le.gain)} vs ${f1(Math.max(...rest.map((x) => x.gain)))}`);
+  } else {
+    check('"?" ends with a rising glide (a bigger final sweep than "." does)', swQ > swP + 3, `final sweep ${f1(swQ)} st vs ${f1(swP)} st for "."`);
+  }
+  const g = createRobotVoice({ ctx: new OfflineAudioContext(1, 100, SR), offline: true });
+  g.setStyle(STYLE);
+  g.config.pitch = 800;
+  check('config is one object that the synth reads (pitch changes the plan)', STYLE === 'chirp' ? g.plan('hello', 'neutral').events[0].freq > base.plan('hello', 'neutral').events[0].freq * 1.3 : g.plan('hello', 'neutral').nuclei[0].hz[0] > base.plan('hello', 'neutral').nuclei[0].hz[0] * 1.3);
+  check('default pitch is about 520 Hz, default volume 0.18', VOICE_CONFIG.pitch === 520 && Math.abs(VOICE_CONFIG.volume - 0.18) < 0.001);
+  const durNeutral = (await render(3, (v) => v.robotSpeak('Hello there', {}))).ret, durFast = (await render(3, (v) => v.robotSpeak('Hello there', { speed: 2 }))).ret;
+  check('robotSpeak returns the duration in ms, and speed 2 is about half as long', durNeutral > 300 && Math.abs(durFast / durNeutral - 0.5) < 0.12, `${durNeutral} ms → ${durFast} ms`);
+  const loud = features((await render(3, (v) => v.robotSpeak('Hello there', { volume: 0.36 }))).x), norm = features((await render(3, (v) => v.robotSpeak('Hello there', { volume: 0.18 }))).x);
+  check('volume option scales the loudness (x2 ≈ +6 dB)', Math.abs((loud.rmsDb - norm.rmsDb) - 6) < 1.5, `${f1(loud.rmsDb - norm.rmsDb)} dB`);
+  check('default loudness is comfortable and never clips', norm.rmsDb > -32 && norm.rmsDb < -12 && Math.max(...rows.map((r) => r.f.peak)) <= 1, `speech at ${f1(norm.rmsDb)} dBFS, loudest mood peak ${f1(Math.max(...rows.map((r) => r.f.peak)))}`);
+  {
+    const { x } = await render(3, (v) => v.robotSpeak('Hello there, I am Quark', {}));
+    const first = 2000, m = magnitude(x, first, 8192); let lo = 0, hi = 0;
+    for (let i = 1; i < m.length; i++) { const f = i * SR / 8192; if (f < 3200) lo += m[i] * m[i]; else if (f > 4800) hi += m[i] * m[i]; }
+    results.lowpassDb = 10 * Math.log10(hi / lo);
+    check('energy above 4.8 kHz is far below the voice band (3.2 kHz low-pass)', results.lowpassDb < -25, `${f1(results.lowpassDb)} dB`);
+  }
+
+  // ======================================================= 5. queue + stop (offline timing parts)
+  h2('5. Queue');
+  const qv = await render(8, (v) => v.speakQueue(['Hi!', 'I missed you.', 'Want to play?'], { mood: 'happy' }));
+  check('speakQueue reports a total length for all sentences', qv.ret.ms > 1500, `${qv.ret.ms} ms`);
+
+  // ======================================================= 6. is it a voice or a row of beeps? (pet voice vs the chirp engine, same sentence, same measurements)
+  if (STYLE === 'voice') {
+    h2('6. Voice or beeps? The pet voice measured against the chirp engine on the same sentences');
+    async function renderAs(style, secs, fn, cfg) {
+      Math.random = mulberry32(777);
+      const ctx = new OfflineAudioContext(1, Math.ceil(SR * secs), SR);
+      const v = createRobotVoice({ ctx, offline: true });
+      v.setStyle(style); if (cfg) cfg(v.config);
+      const ret = fn(v);
+      const buf = await ctx.startRendering();
+      return { x: buf.getChannelData(0), ret, v };
+    }
+    /** Pitch jumps per second: how often the tracked pitch changes by more than 2 semitones between two neighbouring 5 ms frames. A voice glides; beeps jump. */
+    const jumpsPerSec = (x) => {
+      const fr = pitchTrack(x, 220, 1024).filter((f) => f.f);
+      if (fr.length < 10) return NaN;
+      let jumps = 0, pairs = 0;
+      for (let i = 1; i < fr.length; i++) if (fr[i].t - fr[i - 1].t < 0.0065) { pairs++; if (Math.abs(12 * Math.log2(fr[i].f / fr[i - 1].f)) > 2) jumps++; }
+      return jumps / Math.max(0.2, pairs * 0.005);
+    };
+    const sentences = ['Hi! I missed you!', 'Want to play a game?', 'hello there'];
+    const cmp = [];
+    for (const text of sentences) {
+      const vo = await renderAs('voice', 5, (v) => v.robotSpeak(text, { mood: 'neutral' }), (c) => { c.formant.amount = 0; }), ch = await renderAs('chirp', 5, (v) => v.robotSpeak(text, { mood: 'neutral' }), (c) => { c.formant.amount = 0; });
+      const vf = await renderAs('voice', 5, (v) => v.robotSpeak(text, { mood: 'neutral' })), cf = await renderAs('chirp', 5, (v) => v.robotSpeak(text, { mood: 'neutral' }));
+      cmp.push({ text, vJ: jumpsPerSec(vo.x), cJ: jumpsPerSec(ch.x), vF: features(vf.x), cF: features(cf.x) });
+    }
+    log('sentence                        pitch jumps/s (voice | chirp)   energy above 2 kHz % (voice | chirp)   flatness (voice | chirp)');
+    for (const c of cmp) log(`${c.text.padEnd(30)}  ${f1(c.vJ).padStart(8)} | ${f1(c.cJ).padEnd(8)}           ${f1(c.vF.hfShare * 100).padStart(8)} | ${f1(c.cF.hfShare * 100).padEnd(8)}          ${c.vF.flatness.toFixed(3)} | ${c.cF.flatness.toFixed(3)}`);
+    results.compare = cmp.map((c) => ({ text: c.text, vJ: c.vJ, cJ: c.cJ, vHf: c.vF.hfShare, cHf: c.cF.hfShare, vFlat: c.vF.flatness, cFlat: c.cF.flatness }));
+    check('the pet voice glides: fewer sudden pitch jumps per second than the chirp engine on every sentence', cmp.every((c) => c.vJ < c.cJ), cmp.map((c) => `${f1(c.vJ)} vs ${f1(c.cJ)}`).join(', '));
+    check('the pet voice is soft: under 15% of its energy above 2 kHz on every sentence', cmp.every((c) => c.vF.hfShare < 0.15), cmp.map((c) => `${f1(c.vF.hfShare * 100)}%`).join(', '));
+    check('the pet voice is not buzzy or noisy: spectral flatness under 0.1 on every sentence', cmp.every((c) => c.vF.flatness < 0.1), cmp.map((c) => c.vF.flatness.toFixed(3)).join(', '));
+
+    // intonation, measured on the audio: where the pitch is heading in the last 120 ms
+    const finalDir = (x) => {
+      const pts = crossingSeries(x).filter((p) => p.amp > 0.12);
+      const T = pts[pts.length - 1].t;
+      const end = quant(pts.filter((p) => p.t > T - 0.12).map((p) => p.st), 0.5), before = quant(pts.filter((p) => p.t < T - 0.2 && p.t > T - 0.5).map((p) => p.st), 0.5);
+      return end - before;
+    };
+    const dQ = finalDir((await renderAs('voice', 4, (v) => v.robotSpeak('Do you want to play a game?', { mood: 'neutral' }), CLEAN)).x);
+    const dS = finalDir((await renderAs('voice', 4, (v) => v.robotSpeak('I do want to play a game.', { mood: 'neutral' }), CLEAN)).x);
+    const dE = finalDir((await renderAs('voice', 4, (v) => v.robotSpeak('I do want to play a game!', { mood: 'neutral' }), CLEAN)).x);
+    log(`final pitch direction (semitones, end vs just before): question ${f1(dQ)}, statement ${f1(dS)}, exclamation ${f1(dE)}`);
+    check('a question ends going UP and a plain sentence ends going DOWN (measured on the audio)', dQ > 2 && dS < -0.5 && dQ > dS + 3, `question ${f1(dQ)} st, statement ${f1(dS)} st`);
+    check('an exclamation ends higher than a statement', dE > dS + 2, `${f1(dE)} vs ${f1(dS)} st`);
+
+    // different words must be different sounds
+    const trackOf = (w) => { const pl = base.plan(w, 'neutral'); const T = pl.duration, out = []; for (let k = 0; k < 12; k++) { const t = (k + 0.5) / 12 * T; let hz = 0; const pts = pl.score.F2.p; for (let i = 0; i < pts.length - 1; i++) if (t >= pts[i][0] && t <= pts[i + 1][0]) hz = pts[i][1]; out.push(Math.log(hz || 1500)); } return out; };
+    const words = ['hello', 'mommy', 'pizza', 'quick', 'sorry'];
+    let minWordDist = 1e9, closest = '';
+    for (let i = 0; i < words.length; i++) for (let j = i + 1; j < words.length; j++) { const a = trackOf(words[i]), b = trackOf(words[j]); const d = Math.sqrt(mean(a.map((x, k) => (x - b[k]) ** 2))); if (d < minWordDist) { minWordDist = d; closest = words[i] + '/' + words[j]; } }
+    check('different words follow different vowel-shape paths (so they sound like different babble)', minWordDist > 0.08, `closest pair ${closest}, distance ${minWordDist.toFixed(3)}`);
+
+    // cute, not sci-fi: none of the metallic processing by default
+    const touch = base.config;
+    check('cute, not sci-fi: ring mod, bit-crush and echo are off or tiny, and pitches are not stepped', touch.ringMod.amount <= 0.05 && touch.bitcrush.amount <= 0.05 && touch.space.mix <= 0.1 && touch.voice.snap === false, `ring ${touch.ringMod.amount}, crush ${touch.bitcrush.amount}, echo ${touch.space.mix}, snap ${touch.voice.snap}`);
+    check('cute: the voice sits high (speaking pitch above 500 Hz) and every other syllable bounces', base.plan('one two three four', 'neutral').nuclei.length >= 4 && 520 * Math.pow(2, touch.voice.offsetSemis / 12) > 500 && touch.voice.bounce >= 1, `base ${f1(520 * Math.pow(2, touch.voice.offsetSemis / 12))} Hz, bounce ${touch.voice.bounce} st`);
+  }
+
+  Math.random = realRandom;
+  const failed = results.checks.filter((c) => !c.pass);
+  log(`\n<b class="${failed.length ? 'bad' : 'ok'}">${results.checks.length - failed.length}/${results.checks.length} checks passed${failed.length ? ' — FAILED: ' + failed.map((c) => c.name).join(' | ') : ''}</b>`);
+  results.done = true;
+  results.failed = failed.map((c) => c.name);
+}
+run().catch((err) => { Math.random = realRandom; log(`<span class="bad">CRASH ${err && err.stack || err}</span>`); results.error = String(err && err.stack || err); results.done = true; });
+</script>
+</body>
+</html>
